@@ -28,7 +28,7 @@ jobs:
           DB_PORT: ${{ secrets.DB_PORT }}
           DB_CHARSET: "utf8mb4"
         run: |
-          python html_image_merge_crawler_.py
+          python html_image_merge_crawler.py
 
       - name: Commit and push screenshots
         run: |
