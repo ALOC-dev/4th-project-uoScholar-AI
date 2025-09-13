@@ -1,0 +1,14 @@
+mysql-connector-python
+
+python-dotenv
+
+langchain>=0.2,<0.3
+langchain-community>=0.2,<0.3
+langchain-openai>=0.2,<0.3
+langchain-pinecone>=0.1,<0.2   
+
+
+pinecone-client
+
+
+tqdm        
