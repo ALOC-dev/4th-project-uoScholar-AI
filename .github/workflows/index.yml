@@ -25,7 +25,9 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install -r requirements_indexer.txt
+           python -m pip install --upgrade pip
+           pip install --upgrade "setuptools<75" wheel
+           pip install -r requirements_indexer.txt -v
 
       - name: Run indexer
         env:
