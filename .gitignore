@@ -1,0 +1,31 @@
+﻿# Python 캐시/빌드
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+
+# 가상환경
+.venv/
+venv/
+env/
+pyvenv.cfg
+
+# IDE/에디터 설정
+.vscode/
+.idea/
+.DS_Store
+
+# 환경변수/비밀정보
+.env
+*.env
+
+# 데이터/모델 (필요시 LFS로)
+data/raw/
+data/interim/
+models/artifacts/
+
+# OS 파일
+Thumbs.db
