@@ -7,10 +7,11 @@ langchain-text-splitters==0.3.2
 langchain-openai==0.2.14
 
 pinecone==5.4.2
-langchain-pinecone==0.1.6  
+langchain-pinecone==0.2.12
 
 openai==1.107.2
 httpx<0.28
+
 mysql-connector-python==9.4.0
 python-dotenv==1.1.1
 tqdm==4.67.1
