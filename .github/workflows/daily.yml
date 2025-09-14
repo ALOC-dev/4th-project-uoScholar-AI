@@ -28,4 +28,4 @@ jobs:
           DB_PORT: ${{ secrets.DB_PORT }}
           DB_CHARSET: "utf8mb4"
         run: |
-          python run_crawler.py
+          python scripts/run_crawler.py
