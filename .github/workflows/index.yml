@@ -1,0 +1,44 @@
+name: Daily Index Rebuild
+
+on:
+  workflow_run:
+    workflows: ["Daily UOS Notices"]  
+    types:
+      - completed
+  workflow_dispatch: {}
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'workflow_run' &&
+      github.event.workflow_run.conclusion == 'success')
+
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+           python -m pip install --upgrade pip
+           pip install --upgrade "setuptools<75" wheel
+           pip install -r requirements_indexer.txt -v
+
+      - name: Run indexer
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          DB_HOST: ${{ secrets.DB_HOST }}
+          DB_USER: ${{ secrets.DB_USER }}
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+          DB_NAME: ${{ secrets.DB_NAME }}
+          DB_PORT: ${{ secrets.DB_PORT }}
+          PINECONE_API_KEY: ${{ secrets.PINECONE_API_KEY }}
+          PINECONE_INDEX: ${{ secrets.PINECONE_INDEX }}
+          PINECONE_NAMESPACE: ${{ secrets.PINECONE_NAMESPACE }}
+        run: |
+          python scripts/run_indexer.py
