@@ -1,7 +1,7 @@
 name: Daily UOS Notices
 on:
   schedule:
-    - cron: "00 18 * * *"   # UTC 18:00 = KST 03:00, 매일 1회
+  - cron: "0 */6 * * *"   # 6시간에 간격 (09시 15시 21시 03시)
   workflow_dispatch: {}    
 jobs:
   run:
