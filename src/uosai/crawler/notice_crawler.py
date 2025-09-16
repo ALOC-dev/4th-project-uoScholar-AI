@@ -109,6 +109,11 @@ SUMMARY_PROMPT = """
 # =========================
 # 1) 유틸
 # =========================
+
+# 로그 출력
+def log(msg: str) -> None:
+    print(f"[indexer {datetime.now():%Y-%m-%d %H:%M:%S}] {msg}")
+
 @contextmanager
 def mysql_conn():
     conn = mysql.connector.connect(**DB_CONFIG)
@@ -629,11 +634,11 @@ def collect_recent_seqs(list_id: str,
 # =========================
 # 8) 실행부
 # =========================
-print(f"Screenshot directory: {OUT_DIR}")
-if __name__ == "__main__":
-    # 여기 카테고리 추가하면 크롤링
+def main() -> int:
+    print(f"Screenshot directory: {OUT_DIR}")
+
     targets = [
-        "COLLEGE_ENGINEERING" ,
+        "COLLEGE_ENGINEERING",
         "COLLEGE_HUMANITIES",
         "COLLEGE_SOCIAL_SCIENCES",
         "COLLEGE_URBAN_SCIENCE",
@@ -642,7 +647,7 @@ if __name__ == "__main__":
         "COLLEGE_NATURAL_SCIENCES",
         "COLLEGE_LIBERAL_CONVERGENCE",
         "GENERAL",
-        "ACADEMIC"
+        "ACADEMIC",
     ]
 
     for cat in targets:
@@ -663,4 +668,12 @@ if __name__ == "__main__":
             process_one(cat, list_id, seq)
             time.sleep(REQUEST_SLEEP)
 
+    return 0
 
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as e:
+        log(f"ERROR: {type(e).__name__}: {e}")
+        traceback.print_exc()
+        sys.exit(1)
