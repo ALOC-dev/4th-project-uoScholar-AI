@@ -58,17 +58,17 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY").strip()
 client = OpenAI(api_key=OPENAI_API_KEY)
 SUMMARIZE_MODEL = "gpt-4o"
 
-# 임베딩 설정 (한국어 모델 사용)
-EMBED_TYPE = os.getenv("EMBED_TYPE", "korean")
-EMBED_MODEL = os.getenv("EMBED_MODEL", "jhgan/ko-sroberta-multitask")
+# # 임베딩 설정 (한국어 모델 사용)
+# EMBED_TYPE = os.getenv("EMBED_TYPE", "korean")
+# EMBED_MODEL = os.getenv("EMBED_MODEL", "jhgan/ko-sroberta-multitask")
 
-# 한국어 임베딩을 위한 SentenceTransformer 임포트
-try:
-    from sentence_transformers import SentenceTransformer
-    _korean_embed_model = None  # 지연 로딩
-    _SENTENCE_TRANSFORMERS_AVAILABLE = True
-except ImportError:
-    _SENTENCE_TRANSFORMERS_AVAILABLE = False
+# # 한국어 임베딩을 위한 SentenceTransformer 임포트
+# try:
+#     from sentence_transformers import SentenceTransformer
+#     _korean_embed_model = None  # 지연 로딩
+#     _SENTENCE_TRANSFORMERS_AVAILABLE = True
+# except ImportError:
+#     _SENTENCE_TRANSFORMERS_AVAILABLE = False
 
 #################################################################################
 # 카테고리 ↔ list_id 매핑
@@ -105,11 +105,11 @@ SUMMARY_PROMPT = """
 당신의 임무는 "대학 공지사항" 이미지에서 **명시된 사실 정보만** 추출·정규화하여 자연어 문장들로 요약하는 것입니다. 
 원문에 직접적으로 쓰여 있지 않은 정보는 절대 추측/보완/생성하지 마세요. 
 
-[출력 요구] 
+[출력 요구]
 - 반드시 여러 문단의 자연스러운 문장으로만 출력 (최대한 길고 상세하게) 
 - 불필요한 안내/네비게이션 문구는 제외 
 - 해당 공지사항 내에 기재되어 있는 모든 정보에 대해서 빠짐없이 모두 포함하여 요약하여야합니다.
-- 다만, 해당 이미지는 공지사항 웹페이지의 '전체' 캡쳐본입니다. 본문의 내용 및 정보는 절대 누락되선 안되지만, 본문 영역 외의 기존 맥락과 다른 불필요한 정보 (예시 : 공지사항 본문 옆과 밑에 있는 '관련있는 게시물'과 서울시립대학교 학교 주소 및 Copywrite 관련 내용)는 제외해도 됩니다. 
+- 다만, 해당 이미지는 공지사항 웹페이지의 '전체' 캡쳐본입니다. 본문의 내용 및 정보는 절대 누락되선 안되지만, 본문 영역 외의 기존 맥락과 다른 불필요한 정보 (예시 : 공지사항 본문 옆과 밑에 있는 '관련있는 게시물'과 서울시립대학교 학교 주소 및 Copywrite 관련 내용)는 제외해도 됩니다.  
 
 [정규화 규칙]  
 - 수치는 원문 그대로 보존
@@ -235,7 +235,7 @@ def html_to_images_playwright(
             except Exception:
                 pass
 
-            for _ in range(3):
+            for _ in range(6):
                 page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
                 page.wait_for_timeout(700)
 
@@ -297,6 +297,7 @@ def summarize_with_text_and_images(html_text: str, images: List[Image.Image]) ->
 - 수치는 원문 그대로 보존
 - 날짜 및 시간은 원문 그대로 보존
 - 기관/부서, 장소, 전화, 메일은 원문 표기 그대로 사용(추측 금지) 
+- "제공된 HTML 본문 텍스트와 추가 이미지 정보를 바탕으로 한 공지사항은 다음과 같습니다:" 와 같은, 공지 사항의 내용 이외의 다른 멘트는 절대 추가하면 안됨. 정확히 공지사항 내용'만' 포함해야함.
 
 [HTML 본문 텍스트 시작]
 {html_text}
