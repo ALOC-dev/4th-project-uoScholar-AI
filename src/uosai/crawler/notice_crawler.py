@@ -1,4 +1,4 @@
-# html_image_merge_crawler.py
+# src/uosai/crawler/notice_crawler.py
 
 import os
 import time
@@ -56,8 +56,19 @@ DB_CONFIG = {
 # OpenAI
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY").strip()
 client = OpenAI(api_key=OPENAI_API_KEY)
-SUMMARIZE_MODEL = "gpt-4o"  
-EMBED_MODEL = "text-embedding-3-small"
+SUMMARIZE_MODEL = "gpt-4o"
+
+# 임베딩 설정 (한국어 모델 사용)
+EMBED_TYPE = os.getenv("EMBED_TYPE", "korean")
+EMBED_MODEL = os.getenv("EMBED_MODEL", "jhgan/ko-sroberta-multitask")
+
+# 한국어 임베딩을 위한 SentenceTransformer 임포트
+try:
+    from sentence_transformers import SentenceTransformer
+    _korean_embed_model = None  # 지연 로딩
+    _SENTENCE_TRANSFORMERS_AVAILABLE = True
+except ImportError:
+    _SENTENCE_TRANSFORMERS_AVAILABLE = False
 
 #################################################################################
 # 카테고리 ↔ list_id 매핑
@@ -80,15 +91,15 @@ CATEGORY_LIST_PARAMS: Dict[str, Dict[str, str]] = {
     "COLLEGE_ENGINEERING": {"cate_id2": "000010383"},
 }
 
-BASE_URL = "https://www.uos.ac.kr/korNotice/view.do"
-LIST_URL = "https://www.uos.ac.kr/korNotice/list.do"
+BASE_URL = "https://www.uos.ac.kr/korNotice/view.do?identified=anonymous&"
+LIST_URL = "https://www.uos.ac.kr/korNotice/list.do?identified=anonymous&"
 
 
 # 몇 개 크롤링할 건지 
 REQUEST_SLEEP = 1.0
 MISSING_BREAK = 3
 PLAYWRIGHT_TIMEOUT_MS = 90000
-RECENT_WINDOW = 100
+RECENT_WINDOW = 50
 
 SUMMARY_PROMPT = """ 
 당신의 임무는 "대학 공지사항" 이미지에서 **명시된 사실 정보만** 추출·정규화하여 자연어 문장들로 요약하는 것입니다. 
@@ -224,12 +235,12 @@ def html_to_images_playwright(
             except Exception:
                 pass
 
-            for _ in range(6):
+            for _ in range(3):
                 page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
                 page.wait_for_timeout(700)
 
-            page.wait_for_load_state("networkidle", timeout=timeout_ms)
-            page.wait_for_timeout(800)
+            page.wait_for_load_state("domcontentloaded")
+            page.wait_for_timeout(500)
 
             # 전체 페이지 스크린샷
             if full_image_format.lower() == "png":
@@ -310,15 +321,33 @@ def summarize_with_text_and_images(html_text: str, images: List[Image.Image]) ->
         traceback.print_exc(limit=2, file=sys.stdout)
         return ""
 
-def embed_text(text: str) -> list:
-    if not text:
-        return []
-    try:
-        er = client.embeddings.create(input=[text], model=EMBED_MODEL)
-        return er.data[0].embedding
-    except Exception as e:
-        print(f"⚠️ 임베딩 실패(무시하고 진행): {e}")
-        return []
+# def get_korean_embed_model():
+#     """한국어 임베딩 모델을 지연 로딩"""
+#     global _korean_embed_model
+#     if _korean_embed_model is None:
+#         if not _SENTENCE_TRANSFORMERS_AVAILABLE:
+#             raise RuntimeError("sentence-transformers 패키지가 설치되지 않았습니다.")
+#         print(f"[Crawler] Loading Korean embedding model: {EMBED_MODEL}")
+#         _korean_embed_model = SentenceTransformer(EMBED_MODEL)
+#         print(f"[Crawler] Model loaded, dimension: {_korean_embed_model.get_sentence_embedding_dimension()}")
+#     return _korean_embed_model
+
+# def embed_text(text: str) -> list:
+#     if not text:
+#         return []
+#     try:
+#         if EMBED_TYPE == "korean":
+#             # 한국어 모델 사용
+#             model = get_korean_embed_model()
+#             embedding = model.encode([text], convert_to_tensor=False)
+#             return embedding[0].tolist()
+#         else:
+#             # OpenAI 모델 사용
+#             er = client.embeddings.create(input=[text], model=EMBED_MODEL)
+#             return er.data[0].embedding
+#     except Exception as e:
+#         print(f"⚠️ 임베딩 실패(무시하고 진행): {e}")
+#         return []
 
 
 # =========================
@@ -506,9 +535,9 @@ def process_one(category_key: str, list_id: str, seq: int) -> str:
 
     print(summary)
 
-    # 7) 임베딩 (실패해도 저장은 진행)
-    embedding = embed_text(summary)
-    embedding_str = json.dumps(embedding) if embedding else None
+    # # 7) 임베딩 (실패해도 저장은 진행)
+    # embedding = embed_text(summary)
+    # embedding_str = json.dumps(embedding) if embedding else None
 
     # 8) DB 업서트
     row = {
@@ -517,10 +546,10 @@ def process_one(category_key: str, list_id: str, seq: int) -> str:
         "title": title,
         "link": link,
         "summary": summary,
-        "embedding_vector": embedding_str,
+        # "embedding_vector": embedding_str,
         "posted_date": posted_date,
         "department": department,
-    }
+    } 
     try:
         upsert_notice(row)
         print(f"✅ 저장 완료: [{category_key}] seq={seq}, post_number={post_number}, posted_date={posted_date}, title={title[:30]}...")
@@ -638,6 +667,8 @@ def main() -> int:
     print(f"Screenshot directory: {OUT_DIR}")
 
     targets = [
+        "GENERAL",
+        "ACADEMIC",
         "COLLEGE_ENGINEERING",
         "COLLEGE_HUMANITIES",
         "COLLEGE_SOCIAL_SCIENCES",
@@ -646,8 +677,6 @@ def main() -> int:
         "COLLEGE_BUSINESS",
         "COLLEGE_NATURAL_SCIENCES",
         "COLLEGE_LIBERAL_CONVERGENCE",
-        "GENERAL",
-        "ACADEMIC",
     ]
 
     for cat in targets:
