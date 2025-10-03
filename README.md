@@ -5,7 +5,7 @@
 
 이를 해결하기 위해 저희 팀은 필요한 공지를 쉽고 정확하게 제공하는 **RAG 기반 챗봇 "UoScholar"**를 개발하였습니다.
 
-UoScholar는 서울시립대학교 공지사항 데이터를 크롤링하고, 벡터 임베딩을 통해 Pinecone DB에 저장합니다. 이후 **Retrieval-Augmented Generation (RAG)** 기법과 **HyDE (Hypothetical Document Embeddings)**, **Cohere Reranker**를 활용하여 학생들의 질문에 가장 적합한 공지사항을 찾아내고, LLM 기반으로 자연스러운 답변을 제공합니다.
+UoScholar는 서울시립대학교 공지사항 데이터를 크롤링하고, 벡터 임베딩을 통해 Pinecone DB에 저장합니다. 이후 **Retrieval-Augmented Generation (RAG)** 기법과 **Cohere Reranker**를 활용하여 학생들의 질문에 가장 적합한 공지사항을 찾아내고, LLM 기반으로 자연스러운 답변을 제공합니다.
 
 ---
 
@@ -196,3 +196,4 @@ python -m uvicorn src.uosai.chat.chatbot:app --host 0.0.0.0 --port 8000
 - [LangChain 공식 문서](https://python.langchain.com/)
 - [Pinecone 공식 문서](https://docs.pinecone.io/)
 - [Cohere Rerank](https://docs.cohere.com/docs/reranking)
+
