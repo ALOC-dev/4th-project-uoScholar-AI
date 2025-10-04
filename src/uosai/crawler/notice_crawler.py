@@ -2,15 +2,14 @@
 
 import os
 import time
-import json
 import re
-import traceback
 from contextlib import contextmanager
-from datetime import datetime
 from typing import Optional, Dict, List
 
 import base64
 from io import BytesIO
+from collections import OrderedDict
+from urllib.parse import urlencode
 
 import requests
 from bs4 import BeautifulSoup
@@ -31,7 +30,6 @@ try:
     _PLAYWRIGHT_AVAILABLE = True
 except Exception:
     _PLAYWRIGHT_AVAILABLE = False
-
 
 # =========================
 # 0) 환경설정
@@ -58,18 +56,6 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY").strip()
 client = OpenAI(api_key=OPENAI_API_KEY)
 SUMMARIZE_MODEL = "gpt-4o"
 
-# # 임베딩 설정 (한국어 모델 사용)
-# EMBED_TYPE = os.getenv("EMBED_TYPE", "korean")
-# EMBED_MODEL = os.getenv("EMBED_MODEL", "jhgan/ko-sroberta-multitask")
-
-# # 한국어 임베딩을 위한 SentenceTransformer 임포트
-# try:
-#     from sentence_transformers import SentenceTransformer
-#     _korean_embed_model = None  # 지연 로딩
-#     _SENTENCE_TRANSFORMERS_AVAILABLE = True
-# except ImportError:
-#     _SENTENCE_TRANSFORMERS_AVAILABLE = False
-
 #################################################################################
 # 카테고리 ↔ list_id 매핑
 CATEGORIES: Dict[str, str] = {
@@ -81,41 +67,20 @@ CATEGORIES: Dict[str, str] = {
     "COLLEGE_BUSINESS": "20008N2",
     "COLLEGE_NATURAL_SCIENCES": "scien01",
     "COLLEGE_LIBERAL_CONVERGENCE": "clacds01",
-    "GENERAL": "FA1",     # TODO
-    "ACADEMIC": "FA2",    # TODO
+    "GENERAL": "FA1",     
+    "ACADEMIC": "FA2",    
 }
 #################################################################################
 
-# 목록 페이지에 필요한 추가 파라미터 (있을 때만)
-CATEGORY_LIST_PARAMS: Dict[str, Dict[str, str]] = {
-    "COLLEGE_ENGINEERING": {"cate_id2": "000010383"},
-}
+CRAWL_VIEW_URL = "https://www.uos.ac.kr/korNotice/view.do?identified=anonymous&"
+CRAWL_LIST_URL = "https://www.uos.ac.kr/korNotice/list.do?identified=anonymous&"
 
-BASE_URL = "https://www.uos.ac.kr/korNotice/view.do?identified=anonymous&"
-LIST_URL = "https://www.uos.ac.kr/korNotice/list.do?identified=anonymous&"
-
+SAVE_VIEW_URL = "https://www.uos.ac.kr/korNotice/view.do"
 
 # 몇 개 크롤링할 건지 
 REQUEST_SLEEP = 1.0
-MISSING_BREAK = 3
 PLAYWRIGHT_TIMEOUT_MS = 90000
 RECENT_WINDOW = 50
-
-SUMMARY_PROMPT = """ 
-당신의 임무는 "대학 공지사항" 이미지에서 **명시된 사실 정보만** 추출·정규화하여 자연어 문장들로 요약하는 것입니다. 
-원문에 직접적으로 쓰여 있지 않은 정보는 절대 추측/보완/생성하지 마세요. 
-
-[출력 요구]
-- 반드시 여러 문단의 자연스러운 문장으로만 출력 (최대한 길고 상세하게) 
-- 불필요한 안내/네비게이션 문구는 제외 
-- 해당 공지사항 내에 기재되어 있는 모든 정보에 대해서 빠짐없이 모두 포함하여 요약하여야합니다.
-- 다만, 해당 이미지는 공지사항 웹페이지의 '전체' 캡쳐본입니다. 본문의 내용 및 정보는 절대 누락되선 안되지만, 본문 영역 외의 기존 맥락과 다른 불필요한 정보 (예시 : 공지사항 본문 옆과 밑에 있는 '관련있는 게시물'과 서울시립대학교 학교 주소 및 Copywrite 관련 내용)는 제외해도 됩니다.  
-
-[정규화 규칙]  
-- 수치는 원문 그대로 보존
-- 날짜 및 시간은 원문 그대로 보존
-- 기관/부서, 장소, 전화, 메일은 원문 표기 그대로 사용(추측 금지) 
-"""
 
 # =========================
 # 1) 유틸
@@ -374,7 +339,7 @@ def fetch_notice_html(list_id: str, seq: int) -> Optional[str]:
             "menuid": "",
         }
         headers = {"User-Agent": "Mozilla/5.0"}
-        r = requests.get(BASE_URL, params=params, headers=headers, timeout=(CONNECT_TIMEOUT, READ_TIMEOUT))
+        r = requests.get(CRAWL_VIEW_URL, params=params, headers=headers, timeout=(CONNECT_TIMEOUT, READ_TIMEOUT))
         if r.status_code != 200:
             print(f"❌ HTTP {r.status_code} for seq={seq}")
             return None
@@ -426,9 +391,6 @@ ON DUPLICATE KEY UPDATE
     department = new.department
 """
 
-
-UPSERT_SQL = UPSERT_SQL.replace("new.posted_date", "new.posted_date")
-
 EXISTS_SQL = "SELECT posted_date FROM notice WHERE category=%s AND post_number=%s LIMIT 1"
 
 def get_existing_posted_date(category: str, post_number: int) -> Optional[str]:
@@ -456,15 +418,6 @@ def upsert_notice(row: dict):
             ),
         )
         cur.close()
-
-
-def exists_notice(category: str, post_number: int, posted_date: Optional[str]) -> bool:
-    with mysql_conn() as conn:
-        cur = conn.cursor()
-        cur.execute(EXISTS_SQL, (category, post_number, posted_date))
-        exists = cur.fetchone() is not None
-        cur.close()
-        return exists
 
 def _ymd(x: Optional[object]) -> Optional[str]:
     if x is None:
@@ -496,7 +449,8 @@ def process_one(category_key: str, list_id: str, seq: int) -> str:
     posted_date = parsed["posted_date"]
 
     # 3) 링크
-    link = f"{BASE_URL}?list_id={list_id}&seq={seq}"
+    crawl_link = f"{CRAWL_VIEW_URL}list_id={list_id}&seq={seq}"
+    db_link    = f"{SAVE_VIEW_URL}?{urlencode({'list_id': list_id, 'seq': seq})}"
 
     # 4) 중복 체크
     prev_dt_raw = get_existing_posted_date(category_key, post_number)
@@ -516,12 +470,11 @@ def process_one(category_key: str, list_id: str, seq: int) -> str:
     html_text = extract_main_text_from_html(html)
 
     # 5) HTML → 전체 이미지 캡처 (슬라이스 포함)
-    full_path = os.path.join(OUT_DIR, f"{category_key}_{seq}_FULL.png")
     imgs = html_to_images_playwright(
-        link,
+        crawl_link,
         viewport_width=1200,
         slice_height=1800,
-        debug_full_image_path=full_path,     # 전체 1장 저장
+        debug_full_image_path=None,     # 전체 1장 저장
         full_image_format="png",
     )
     if not imgs:
@@ -536,16 +489,12 @@ def process_one(category_key: str, list_id: str, seq: int) -> str:
 
     print(summary)
 
-    # # 7) 임베딩 (실패해도 저장은 진행)
-    # embedding = embed_text(summary)
-    # embedding_str = json.dumps(embedding) if embedding else None
-
     # 8) DB 업서트
     row = {
         "category": category_key,
         "post_number": post_number,
         "title": title,
-        "link": link,
+        "link": db_link,
         "summary": summary,
         # "embedding_vector": embedding_str,
         "posted_date": posted_date,
@@ -565,10 +514,6 @@ def process_one(category_key: str, list_id: str, seq: int) -> str:
 # =========================
 # 7) 목록 HTML에서 seq 추출
 # =========================
-from collections import OrderedDict
-
-from bs4 import BeautifulSoup
-import re
 
 def extract_seqs_skip_pinned(html: str) -> List[int]:
     """
@@ -606,7 +551,6 @@ def extract_seqs_skip_pinned(html: str) -> List[int]:
             seqs.append(int(m.group(1)))
 
     # 순서 유지한 중복 제거
-    from collections import OrderedDict
     return list(OrderedDict.fromkeys(seqs))
 
 
@@ -634,7 +578,7 @@ def collect_recent_seqs(list_id: str,
         if extra_params:
             params.update(extra_params)
 
-        r = requests.get(LIST_URL, params=params, headers=headers, timeout=(CONNECT_TIMEOUT, READ_TIMEOUT))
+        r = requests.get(CRAWL_LIST_URL, params=params, headers=headers, timeout=(CONNECT_TIMEOUT, READ_TIMEOUT))
         if r.status_code != 200:
             print(f"❌ 목록 HTTP {r.status_code} (list_id={list_id}, page={page}, params={params})")
             break
@@ -686,8 +630,7 @@ def main() -> int:
             print(f"⏭️  {cat}: list_id 미설정 → 건너뜀")
             continue
 
-        extra = None
-        seqs = collect_recent_seqs(list_id, extra_params=extra, limit=RECENT_WINDOW, max_pages=10)
+        seqs = collect_recent_seqs(list_id, extra_params=None, limit=RECENT_WINDOW, max_pages=10)
 
         if not seqs:
             print(f"⚠️ {cat}: 목록에서 seq를 찾지 못해 건너뜀")
