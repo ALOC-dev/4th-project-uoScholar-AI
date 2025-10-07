@@ -77,6 +77,10 @@ CRAWL_LIST_URL = "https://www.uos.ac.kr/korNotice/list.do?identified=anonymous&"
 
 SAVE_VIEW_URL = "https://www.uos.ac.kr/korNotice/view.do"
 
+#################################################################################
+
+CHEME_LIST_URL = "https://cheme.uos.ac.kr/bbs/board.php?bo_table=notice" #화학공학과
+
 # 몇 개 크롤링할 건지 
 REQUEST_SLEEP = 1.0
 PLAYWRIGHT_TIMEOUT_MS = 90000
@@ -287,35 +291,6 @@ def summarize_with_text_and_images(html_text: str, images: List[Image.Image]) ->
         traceback.print_exc(limit=2, file=sys.stdout)
         return ""
 
-# def get_korean_embed_model():
-#     """한국어 임베딩 모델을 지연 로딩"""
-#     global _korean_embed_model
-#     if _korean_embed_model is None:
-#         if not _SENTENCE_TRANSFORMERS_AVAILABLE:
-#             raise RuntimeError("sentence-transformers 패키지가 설치되지 않았습니다.")
-#         print(f"[Crawler] Loading Korean embedding model: {EMBED_MODEL}")
-#         _korean_embed_model = SentenceTransformer(EMBED_MODEL)
-#         print(f"[Crawler] Model loaded, dimension: {_korean_embed_model.get_sentence_embedding_dimension()}")
-#     return _korean_embed_model
-
-# def embed_text(text: str) -> list:
-#     if not text:
-#         return []
-#     try:
-#         if EMBED_TYPE == "korean":
-#             # 한국어 모델 사용
-#             model = get_korean_embed_model()
-#             embedding = model.encode([text], convert_to_tensor=False)
-#             return embedding[0].tolist()
-#         else:
-#             # OpenAI 모델 사용
-#             er = client.embeddings.create(input=[text], model=EMBED_MODEL)
-#             return er.data[0].embedding
-#     except Exception as e:
-#         print(f"⚠️ 임베딩 실패(무시하고 진행): {e}")
-#         return []
-
-
 # =========================
 # 4) HTML 파싱 (상세)
 # =========================
@@ -496,9 +471,10 @@ def process_one(category_key: str, list_id: str, seq: int) -> str:
         "title": title,
         "link": db_link,
         "summary": summary,
-        # "embedding_vector": embedding_str,
+        "embedding_vector": None,
         "posted_date": posted_date,
         "department": department,
+        "viewCount" : "0"
     } 
     try:
         upsert_notice(row)
@@ -604,9 +580,192 @@ def collect_recent_seqs(list_id: str,
 
     return collected
 
+# =========================
+# 8) 예외 학과 처리
+# =========================
+
+def collect_recent_seqs_cheme(limit: int = 100, max_pages: int = 20) -> List[int]:
+    headers = {"User-Agent": "Mozilla/5.0"}
+    collected: List[int] = []
+    seen = set()
+
+    for page in range(1, max_pages + 1):
+        params = {"bo_table": "notice", "page": page}
+        r = requests.get(CHEME_LIST_URL, params=params, headers=headers, timeout=(10, 20))
+        if r.status_code != 200:
+            print(f"❌ 화학공학과 목록 요청 실패 page={page}: {r.status_code}")
+            break
+
+        soup = BeautifulSoup(r.text, "html.parser")
+
+        # wr_id 수집 (댓글 앵커 등 제외)
+        page_ids: List[int] = []
+        for a in soup.select("a[href*='wr_id=']"):
+            href = a.get("href", "")
+            m = re.search(r"wr_id=(\d+)", href)
+            if m:
+                wr_id = int(m.group(1))
+                # (선택) 댓글 앵커, 파일 링크 등 제외 조건이 필요하면 여기서 필터
+                page_ids.append(wr_id)
+
+        # 중복 제거 + 순서 유지
+        page_ids = list(OrderedDict.fromkeys(page_ids))
+
+        # 새로 본 wr_id만 추가
+        new_cnt = 0
+        for wid in page_ids:
+            if wid not in seen:
+                seen.add(wid)
+                collected.append(wid)
+                new_cnt += 1
+                if len(collected) >= limit:
+                    return collected
+
+        # 이 페이지에서 새로 얻은 게 없으면 중단
+        if new_cnt == 0:
+            break
+
+        time.sleep(0.2) 
+
+    return collected
+
+def fetch_notice_html_cheme(wr_id: int) -> Optional[str]:
+    """화학공학과 개별 공지 HTML 가져오기"""
+    url = f"{CHEME_LIST_URL}&wr_id={wr_id}"
+    headers = {"User-Agent": "Mozilla/5.0"}
+    r = requests.get(url, headers=headers, timeout=(10, 20))
+    if r.status_code != 200:
+        print(f"❌ 화학공학과 상세 요청 실패 wr_id={wr_id}, status={r.status_code}")
+        return None
+    return r.text
+
+def parse_date_any(text: str) -> Optional[str]:
+    if not text:
+        return None
+    t = text.strip()
+    # 예: 25-09-24, 25-09-24 11:02, (25-09-24) 등 변형도 허용
+    m = re.search(r'(?<!\d)(?P<yy>\d{2})-(?P<mm>\d{2})-(?P<dd>\d{2})(?!\d)', t)
+    if m:
+        yy = int(m['yy']); mm = int(m['mm']); dd = int(m['dd'])
+        yyyy = 2000 + yy          # 20xx로 해석
+        return f"{yyyy:04d}-{mm:02d}-{dd:02d}"
+    return None
+
+def parse_notice_fields_cheme(html: str, wr_id: int) -> Optional[dict]:
+    from bs4 import BeautifulSoup
+    soup = BeautifulSoup(html, "html.parser")
+
+    # ✅ 제목: h2#bo_v_title > span.bo_v_tit
+    title_el = soup.select_one("#bo_v_title .bo_v_tit") or soup.select_one("#bo_v_title")
+    title = title_el.get_text(" ", strip=True) if title_el else ""
+
+    # ✅ 본문: section#bo_v_atc (gnuboard 본문 영역)
+    content_el = soup.select_one("#bo_v_atc") or soup.select_one(".board_view, .view_content, #bo_v")
+    content_text = content_el.get_text("\n", strip=True) if content_el else soup.get_text("\n", strip=True)
+
+    # ✅ 날짜: section#bo_v_info 등
+    date_el = soup.select_one("#bo_v_info, .bo_v_info, .view_info, .board_view .info")
+    date_text = date_el.get_text(" ", strip=True) if date_el else datetime.now().strftime("%Y-%m-%d")
+
+    # 조회수 추출 (예시: 33)
+    view_count_el = soup.select_one("strong > i.fa-eye")  # 조회수에 해당하는 i 태그를 선택
+
+    if view_count_el:
+        raw_text = view_count_el.find_previous("strong").text.strip()
+        m = re.search(r'\d+', raw_text)  # 숫자만 추출
+        view_count = int(m.group()) if m else 0
+    else:
+        view_count = 0  
+
+    return {
+        "title": title,                         # ← 이제 깔끔한 제목
+        "department": "화학공학과",
+        "posted_date": parse_date_any(date_text) or datetime.now().strftime("%Y-%m-%d"),
+        "post_number": wr_id,
+        "content_text": content_text,
+        "view_count": view_count  # 조회수 추가
+    }
+
+def process_one_cheme(wr_id: int) -> str:
+    """화학공학과 공지사항 한 건 처리 (포털 방식과 동일하게)"""
+    html = fetch_notice_html_cheme(wr_id)
+    if not html:
+        print(f"⚠️ wr_id={wr_id}: HTML 로드 실패 → 스킵")
+        return "skipped_error"
+
+    parsed = parse_notice_fields_cheme(html, wr_id)
+    if not parsed:
+        print(f"wr_id={wr_id}: 게시물 없음")
+        return "not_found"
+
+    post_number = parsed["post_number"]
+    title = parsed["title"]
+    department = parsed["department"]
+    posted_date = parsed["posted_date"]
+    view_count = parsed["view_count"]  
+
+    # 링크
+    crawl_link = f"{CHEME_LIST_URL}&wr_id={wr_id}"
+    db_link    = crawl_link  # DB에 저장할 링크
+
+    # 중복 체크
+    prev_dt_raw = get_existing_posted_date("DEPT_CHEMICAL_ENGINEERING", post_number)
+    prev_dt = _ymd(prev_dt_raw)
+    curr_dt = _ymd(posted_date)
+
+    if prev_dt:
+        if prev_dt == curr_dt:
+            print(f"wr_id={wr_id} (post_number={post_number}) 이미 존재 (posted_date={curr_dt}) → 스킵")
+            return "stored"
+        else:
+            print(f"wr_id={wr_id} (post_number={post_number}) 날짜 변경 {prev_dt} → {curr_dt}, 업데이트 진행")
+
+    # HTML 본문 텍스트 추출
+    html_text = extract_main_text_from_html(html)
+
+    # HTML → 전체 이미지 캡처
+    imgs = html_to_images_playwright(
+        crawl_link,
+        viewport_width=1200,
+        slice_height=1800,
+        debug_full_image_path=None,
+        full_image_format="png",
+    )
+    if not imgs:
+        print(f"↳ wr_id={wr_id}: 이미지 캡처 실패 → 스킵")
+        return "skipped_error"
+
+    # 텍스트 + 이미지 동시 요약
+    summary = summarize_with_text_and_images(html_text, imgs)
+    if not summary:
+        print(f"↳ wr_id={wr_id}: 텍스트+이미지 요약 실패 → 스킵")
+        return "skipped_error"
+
+    print(summary)
+    # DB 업서트
+    row = {
+        "category": "COLLEGE_ENGINEERING",
+        "post_number": post_number,
+        "title": title,
+        "link": db_link,
+        "summary": summary,
+        "embedding_vector": None,
+        "posted_date": posted_date,
+        "department": department,
+        "viewCount": view_count
+    }
+    try:
+        upsert_notice(row)
+        print(f"✅ 저장 완료: [화학공학과] wr_id={wr_id}, post_number={post_number}, title={title[:50]}, link={db_link}, posted_date={posted_date}, department={department}, viewCount={view_count}")
+        return "stored"
+    except MySQLError as e:
+        print(f"❌ DB 저장 실패: {e.__class__.__name__}({getattr(e,'errno',None)}): {e}")
+        tb = traceback.format_exc(limit=3)
+        print(f"↳ Traceback(요약):\n{tb}")
+        return "skipped_error"
 
 # =========================
-# 8) 실행부
+# 9) 실행부
 # =========================
 def main() -> int:
     print(f"Screenshot directory: {OUT_DIR}")
@@ -621,7 +780,7 @@ def main() -> int:
         "COLLEGE_ARTS_SPORTS",
         "COLLEGE_BUSINESS",
         "COLLEGE_NATURAL_SCIENCES",
-        "COLLEGE_LIBERAL_CONVERGENCE",
+        "COLLEGE_LIBERAL_CONVERGENCE"
     ]
 
     for cat in targets:
@@ -640,6 +799,14 @@ def main() -> int:
         for seq in reversed(seqs):
             process_one(cat, list_id, seq)
             time.sleep(REQUEST_SLEEP)
+
+    # 🔹 화학공학과 공지 처리
+    seqs = collect_recent_seqs_cheme(limit=100)
+    
+    print(f"==== [화학공학과] {len(seqs)}개 수집됨 ====", flush=True)
+    for wr_id in reversed(seqs):
+        process_one_cheme(wr_id)
+        time.sleep(REQUEST_SLEEP)
 
     return 0
 
