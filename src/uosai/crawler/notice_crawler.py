@@ -80,6 +80,7 @@ SAVE_VIEW_URL = "https://www.uos.ac.kr/korNotice/view.do"
 #################################################################################
 
 CHEME_LIST_URL = "https://cheme.uos.ac.kr/bbs/board.php?bo_table=notice" #화학공학과
+LIFE_SCI_LIST_URL = "https://lifesci.uos.ac.kr/community/notice"         #생명과학과
 
 # 몇 개 크롤링할 건지 
 REQUEST_SLEEP = 1.0
@@ -581,7 +582,7 @@ def collect_recent_seqs(list_id: str,
     return collected
 
 # =========================
-# 8) 예외 학과 처리
+# 8-1) 화학공학과
 # =========================
 
 def collect_recent_seqs_cheme(limit: int = 100, max_pages: int = 20) -> List[int]:
@@ -752,7 +753,7 @@ def process_one_cheme(wr_id: int) -> str:
         "embedding_vector": None,
         "posted_date": posted_date,
         "department": department,
-        "viewCount": view_count
+        "view_count": view_count
     }
     try:
         upsert_notice(row)
@@ -762,6 +763,176 @@ def process_one_cheme(wr_id: int) -> str:
         print(f"❌ DB 저장 실패: {e.__class__.__name__}({getattr(e,'errno',None)}): {e}")
         tb = traceback.format_exc(limit=3)
         print(f"↳ Traceback(요약):\n{tb}")
+        return "skipped_error"
+    
+# =========================
+# 8-2) 생명과학과
+# =========================
+
+def collect_recent_seqs_lifesci(limit: int = 100, max_pages: int = 20) -> List[int]:
+    headers = {"User-Agent": "Mozilla/5.0"}
+    collected: List[int] = []
+    seen = set()
+
+    for page in range(1, max_pages + 1):
+        params = {"page": page}
+        r = requests.get(LIFE_SCI_LIST_URL, params=params, headers=headers, timeout=(10, 20))
+        if r.status_code != 200:
+            print(f"❌ 생명과학과 목록 요청 실패 page={page}: {r.status_code}")
+            break
+
+        soup = BeautifulSoup(r.text, "html.parser")
+
+        # ✅ 리스트 구조나 배지 클래스에 의존하지 않고, bbsidx 링크만 수집
+        page_ids: List[int] = []
+        for a in soup.select('a[href*="bbsidx="]'):
+            href = a.get("href", "")
+            m = re.search(r"bbsidx=(\d+)", href)
+            if m:
+                page_ids.append(int(m.group(1)))
+
+        # 중복 제거 + 순서 유지
+        page_ids = list(OrderedDict.fromkeys(page_ids))
+
+        new_cnt = 0
+        for idx in page_ids:
+            if idx not in seen:
+                seen.add(idx)
+                collected.append(idx)
+                new_cnt += 1
+                if len(collected) >= limit:
+                    return collected
+
+        if new_cnt == 0:
+            break
+
+        time.sleep(0.2)
+
+    return collected
+
+def fetch_notice_html_lifesci(bbsidx: int) -> Optional[str]:
+    """생명과학과 개별 공지 HTML 가져오기 (화공과 fetch 함수와 구조 동일)"""
+    # URL 구조: ...notice?md=v&bbsidx=11971
+    url = f"{LIFE_SCI_LIST_URL}?md=v&bbsidx={bbsidx}"
+    headers = {"User-Agent": "Mozilla/5.0"}
+    r = requests.get(url, headers=headers, timeout=(10, 20))
+    if r.status_code != 200:
+        print(f"❌ 생명과학과 상세 요청 실패 bbsidx={bbsidx}, status={r.status_code}")
+        return None
+    return r.text
+
+def parse_notice_fields_lifesci(html: str, bbsidx: int) -> Optional[dict]:
+    soup = BeautifulSoup(html, "html.parser")
+
+    # ✅ 제목: h1.bbstitle
+    title_el = soup.select_one("h1.bbstitle")
+    title = title_el.get_text(" ", strip=True) if title_el else ""
+
+    # ✅ 날짜/조회수: div.writer 안의 텍스트에서 추출
+    writer_el = soup.select_one("div.writer")
+    date_text, view_count = "", 0
+    if writer_el:
+        text = writer_el.get_text(" ", strip=True)
+        # 날짜 추출 (예: 2022-07-15)
+        m_date = re.search(r"\d{4}-\d{2}-\d{2}", text)
+        if m_date:
+            date_text = m_date.group()
+        # 조회수 추출 (예: 조회수 525)
+        m_view = re.search(r"조회수\s*([0-9,]+)", text)
+        if m_view:
+            view_count = int(m_view.group(1).replace(",", ""))
+
+    # ✅ 본문 추출: extract_main_text_from_html 이용
+    content_text = extract_main_text_from_html(html)
+
+    # ✅ 날짜 없으면 오늘 날짜로 대체
+    posted_date = parse_date_yyyy_mm_dd(date_text) or datetime.now().strftime("%Y-%m-%d")
+
+    return {
+        "title": title,
+        "department": "생명과학과",
+        "posted_date": posted_date,
+        "post_number": bbsidx,
+        "content_text": content_text,
+        "view_count": view_count,
+    }
+
+def process_one_lifesci(bbsidx: int) -> str:
+    """생명과학과 공지사항 한 건 처리 (화공과 process 함수와 구조 동일)"""
+    html = fetch_notice_html_lifesci(bbsidx)
+    if not html:
+        print(f"⚠️ bbsidx={bbsidx}: HTML 로드 실패 → 스킵")
+        return "skipped_error"
+
+    parsed = parse_notice_fields_lifesci(html, bbsidx)
+    if not parsed:
+        print(f"bbsidx={bbsidx}: 게시물 없음")
+        return "not_found"
+
+    post_number = parsed["post_number"]
+    title = parsed["title"]
+    department = parsed["department"]
+    posted_date = parsed["posted_date"]
+    view_count = parsed["view_count"] 
+
+    # 링크
+    crawl_link = f"{LIFE_SCI_LIST_URL}?md=v&bbsidx={bbsidx}"
+    db_link = crawl_link 
+
+    # 중복 체크: 자연과학대학 카테고리 사용 (COLLEGE_NATURAL_SCIENCES)
+    prev_dt_raw = get_existing_posted_date("COLLEGE_NATURAL_SCIENCES", post_number)
+    prev_dt = _ymd(prev_dt_raw)
+    curr_dt = _ymd(posted_date)
+
+    if prev_dt:
+        if prev_dt == curr_dt:
+            print(f"bbsidx={bbsidx} (post_number={post_number}) 이미 존재 (posted_date={curr_dt}) → 스킵")
+            return "stored"
+        else:
+            print(f"bbsidx={bbsidx} (post_number={post_number}) 날짜 변경 {prev_dt} → {curr_dt}, 업데이트 진행")
+
+    # HTML 본문 텍스트 추출
+    html_text = extract_main_text_from_html(html)
+
+    # HTML → 전체 이미지 캡처
+    imgs = html_to_images_playwright(
+        crawl_link,
+        viewport_width=1200,
+        slice_height=1800,
+        debug_full_image_path=None,
+        full_image_format="png",
+    )
+    if not imgs:
+        print(f"↳ bbsidx={bbsidx}: 이미지 캡처 실패 → 스킵")
+        return "skipped_error"
+
+    # 텍스트 + 이미지 동시 요약
+    summary = summarize_with_text_and_images(html_text, imgs)
+    if not summary:
+        print(f"↳ bbsidx={bbsidx}: 텍스트+이미지 요약 실패 → 스킵")
+        return "skipped_error"
+
+    print(summary)
+    
+    # DB 업서트
+    row = {
+        "category": "COLLEGE_NATURAL_SCIENCES",
+        "post_number": post_number,
+        "title": title,
+        "link": db_link,
+        "summary": summary,
+        "embedding_vector": None,
+        "posted_date": posted_date,
+        "department": department,
+        "view_count": view_count
+    }
+    try:
+        upsert_notice(row)
+        print(f"✅ 저장 완료: [생명과학과] bbsidx={bbsidx}, post_number={post_number}, title={title[:50]}, link={db_link}, posted_date={posted_date}, viewcount={view_count}, department={department}")
+        return "stored"
+    except MySQLError as e:
+        print(f"❌ DB 저장 실패: {e.__class__.__name__}: {e}")
+        traceback.print_exc(limit=3, file=sys.stdout)
         return "skipped_error"
 
 # =========================
@@ -800,12 +971,20 @@ def main() -> int:
             process_one(cat, list_id, seq)
             time.sleep(REQUEST_SLEEP)
 
-    # 🔹 화학공학과 공지 처리
+    # # 🔹 화학공학과 공지 처리
     seqs = collect_recent_seqs_cheme(limit=100)
     
     print(f"==== [화학공학과] {len(seqs)}개 수집됨 ====", flush=True)
     for wr_id in reversed(seqs):
         process_one_cheme(wr_id)
+        time.sleep(REQUEST_SLEEP)
+
+    # 🔹 생명과학과 공지 처리
+    seqs = collect_recent_seqs_lifesci(limit=100)
+    
+    print(f"==== [생명과학과] {len(seqs)}개 수집됨 ====", flush=True)
+    for wr_id in reversed(seqs):
+        process_one_lifesci(wr_id)
         time.sleep(REQUEST_SLEEP)
 
     return 0
