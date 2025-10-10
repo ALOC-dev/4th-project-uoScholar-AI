@@ -57,7 +57,7 @@ client = OpenAI(api_key=OPENAI_API_KEY)
 SUMMARIZE_MODEL = "gpt-4o"
 
 #################################################################################
-# 카테고리 ↔ list_id 매핑
+# 카테고리 ↔ list_id 매핑 (포털 공통)
 CATEGORIES: Dict[str, str] = {
     "COLLEGE_ENGINEERING": "20013DA1",
     "COLLEGE_HUMANITIES": "human01",
@@ -67,20 +67,78 @@ CATEGORIES: Dict[str, str] = {
     "COLLEGE_BUSINESS": "20008N2",
     "COLLEGE_NATURAL_SCIENCES": "scien01",
     "COLLEGE_LIBERAL_CONVERGENCE": "clacds01",
-    "GENERAL": "FA1",     
-    "ACADEMIC": "FA2",    
+    "GENERAL": "FA1",
+    "ACADEMIC": "FA2",
 }
-#################################################################################
 
 CRAWL_VIEW_URL = "https://www.uos.ac.kr/korNotice/view.do?identified=anonymous&"
 CRAWL_LIST_URL = "https://www.uos.ac.kr/korNotice/list.do?identified=anonymous&"
-
 SAVE_VIEW_URL = "https://www.uos.ac.kr/korNotice/view.do"
 
 #################################################################################
-
-CHEME_LIST_URL = "https://cheme.uos.ac.kr/bbs/board.php?bo_table=notice" #화학공학과
-LIFE_SCI_LIST_URL = "https://lifesci.uos.ac.kr/community/notice"         #생명과학과
+# 학과별 독립 URL 설정 (각 학과마다 다른 base_url과 파싱 로직)
+#################################################################################
+DEPT_CONFIGS = {
+    "DEPT_CHEMICAL_ENGINEERING": {
+        "category": "COLLEGE_ENGINEERING",
+        "department": "화학공학과",
+        "list_url": "https://cheme.uos.ac.kr/bbs/board.php?bo_table=notice",
+        "id_param": "wr_id",        # URL 파라미터명
+        "list_params": {"bo_table": "notice"},  # 목록 조회용 기본 파라미터
+        "url_type": "query",  # query 파라미터 방식
+        "selectors": {
+            "title": ["#bo_v_title .bo_v_tit", "#bo_v_title"],
+            "content": ["#bo_v_atc", ".board_view", ".view_content", "#bo_v"],
+            "date_info": ["#bo_v_info", ".bo_v_info", ".view_info", ".board_view .info"],
+            "view_count": "strong > i.fa-eye",  # 조회수 아이콘
+        }
+    },
+    "DEPT_LIFE_SCIENCE": {
+        "category": "COLLEGE_NATURAL_SCIENCES",
+        "department": "생명과학과",
+        "list_url": "https://lifesci.uos.ac.kr/community/notice",
+        "id_param": "bbsidx",
+        "list_params": {},  # 기본 파라미터 없음
+        "url_type": "query",  # query 파라미터 방식
+        "selectors": {
+            "title": ["h1.bbstitle"],
+            "content": [],  # extract_main_text_from_html 사용
+            "date_info": ["div.writer"],
+            "view_count": "div.writer",  # 텍스트에서 파싱
+        }
+    },
+    "DEPT_ECONOMICS": {
+        "category": "COLLEGE_SOCIAL_SCIENCES",
+        "department": "경제학부",
+        "list_url": "https://econ.uos.ac.kr/notices/undergraduate",
+        "id_param": "post_id",  # 더미 (실제로는 경로에서 추출)
+        "list_params": {},
+        "url_type": "path",  # 경로(path) 방식 (예: /notices/19184)
+        "detail_url_template": "https://econ.uos.ac.kr/notices/{post_id}",  # 상세 URL 템플릿
+        "selectors": {
+            "title": ["h2.uos-post-header__title", ".uos-post-header__title"],
+            "content": ["div.uos-post__content", ".uos-post__content"],
+            "date_info": ["span.uos-meta-section__date-value", ".uos-meta-section__date-value"],
+            "view_count": None,  # 조회수 없음
+        }
+    },
+    "DEPT_ARCHITECTURE": {
+        "category": "COLLEGE_URBAN_SCIENCE",
+        "department": "건축학부",
+        "list_url": "https://uosarch.ac.kr/board/notice/",
+        "id_param": "post_slug",  # WordPress slug 방식
+        "list_params": {},
+        "url_type": "slug",  # slug 방식 (WordPress)
+        "detail_url_base": "https://uosarch.ac.kr/uosarch_notice/",  # 상세 URL 베이스
+        "selectors": {
+            "title": ["h2.__post-title", ".__post-title"],
+            "content": ["div.__post-content", ".__post-content"],
+            "date_info": ["div.__post-date", ".__post-date", "div.__post-meta"],
+            "view_count": "div.__post-view",  # Views 168 형태
+        }
+    },
+}
+#################################################################################
 
 # 몇 개 크롤링할 건지 
 REQUEST_SLEEP = 1.0
@@ -355,16 +413,17 @@ def parse_notice_fields(html: str, seq: int) -> Optional[dict]:
 # =========================
 UPSERT_SQL = """
 INSERT INTO notice
-    (category, post_number, title, link, summary, embedding_vector, posted_date, department)
+    (category, post_number, title, link, summary, embedding_vector, posted_date, department, view_count)
 VALUES
-    (%s, %s, %s, %s, %s, %s, %s, %s) AS new
+    (%s, %s, %s, %s, %s, %s, %s, %s, %s) AS new
 ON DUPLICATE KEY UPDATE
     title = new.title,
     link = new.link,
     summary = new.summary,
     embedding_vector = new.embedding_vector,
     posted_date = new.posted_date,
-    department = new.department
+    department = new.department,
+    view_count = new.view_count
 """
 
 EXISTS_SQL = "SELECT posted_date FROM notice WHERE category=%s AND post_number=%s LIMIT 1"
@@ -391,6 +450,7 @@ def upsert_notice(row: dict):
                 row.get("embedding_vector") or None,
                 row["posted_date"],
                 row.get("department") or None,
+                row.get("view_count") or 0,
             ),
         )
         cur.close()
@@ -582,223 +642,88 @@ def collect_recent_seqs(list_id: str,
     return collected
 
 # =========================
-# 8-1) 화학공학과
+# 8) 학과별 통합 처리 함수들
 # =========================
 
-def collect_recent_seqs_cheme(limit: int = 100, max_pages: int = 20) -> List[int]:
+def collect_recent_seqs_generic(dept_key: str, limit: int = 100, max_pages: int = 20) -> List:
+    """학과별 독립 URL에서 게시물 ID/slug 수집 (통합)"""
+    config = DEPT_CONFIGS.get(dept_key)
+    if not config:
+        print(f"❌ 설정되지 않은 학과: {dept_key}")
+        return []
+
+    list_url = config["list_url"]
+    id_param = config["id_param"]
+    list_params = config.get("list_params", {})
+    url_type = config.get("url_type", "query")  # "query", "path", "slug"
+
     headers = {"User-Agent": "Mozilla/5.0"}
-    collected: List[int] = []
+    collected = []
     seen = set()
 
     for page in range(1, max_pages + 1):
-        params = {"bo_table": "notice", "page": page}
-        r = requests.get(CHEME_LIST_URL, params=params, headers=headers, timeout=(10, 20))
-        if r.status_code != 200:
-            print(f"❌ 화학공학과 목록 요청 실패 page={page}: {r.status_code}")
-            break
-
-        soup = BeautifulSoup(r.text, "html.parser")
-
-        # wr_id 수집 (댓글 앵커 등 제외)
-        page_ids: List[int] = []
-        for a in soup.select("a[href*='wr_id=']"):
-            href = a.get("href", "")
-            m = re.search(r"wr_id=(\d+)", href)
-            if m:
-                wr_id = int(m.group(1))
-                # (선택) 댓글 앵커, 파일 링크 등 제외 조건이 필요하면 여기서 필터
-                page_ids.append(wr_id)
-
-        # 중복 제거 + 순서 유지
-        page_ids = list(OrderedDict.fromkeys(page_ids))
-
-        # 새로 본 wr_id만 추가
-        new_cnt = 0
-        for wid in page_ids:
-            if wid not in seen:
-                seen.add(wid)
-                collected.append(wid)
-                new_cnt += 1
-                if len(collected) >= limit:
-                    return collected
-
-        # 이 페이지에서 새로 얻은 게 없으면 중단
-        if new_cnt == 0:
-            break
-
-        time.sleep(0.2) 
-
-    return collected
-
-def fetch_notice_html_cheme(wr_id: int) -> Optional[str]:
-    """화학공학과 개별 공지 HTML 가져오기"""
-    url = f"{CHEME_LIST_URL}&wr_id={wr_id}"
-    headers = {"User-Agent": "Mozilla/5.0"}
-    r = requests.get(url, headers=headers, timeout=(10, 20))
-    if r.status_code != 200:
-        print(f"❌ 화학공학과 상세 요청 실패 wr_id={wr_id}, status={r.status_code}")
-        return None
-    return r.text
-
-def parse_date_any(text: str) -> Optional[str]:
-    if not text:
-        return None
-    t = text.strip()
-    # 예: 25-09-24, 25-09-24 11:02, (25-09-24) 등 변형도 허용
-    m = re.search(r'(?<!\d)(?P<yy>\d{2})-(?P<mm>\d{2})-(?P<dd>\d{2})(?!\d)', t)
-    if m:
-        yy = int(m['yy']); mm = int(m['mm']); dd = int(m['dd'])
-        yyyy = 2000 + yy          # 20xx로 해석
-        return f"{yyyy:04d}-{mm:02d}-{dd:02d}"
-    return None
-
-def parse_notice_fields_cheme(html: str, wr_id: int) -> Optional[dict]:
-    from bs4 import BeautifulSoup
-    soup = BeautifulSoup(html, "html.parser")
-
-    # ✅ 제목: h2#bo_v_title > span.bo_v_tit
-    title_el = soup.select_one("#bo_v_title .bo_v_tit") or soup.select_one("#bo_v_title")
-    title = title_el.get_text(" ", strip=True) if title_el else ""
-
-    # ✅ 본문: section#bo_v_atc (gnuboard 본문 영역)
-    content_el = soup.select_one("#bo_v_atc") or soup.select_one(".board_view, .view_content, #bo_v")
-    content_text = content_el.get_text("\n", strip=True) if content_el else soup.get_text("\n", strip=True)
-
-    # ✅ 날짜: section#bo_v_info 등
-    date_el = soup.select_one("#bo_v_info, .bo_v_info, .view_info, .board_view .info")
-    date_text = date_el.get_text(" ", strip=True) if date_el else datetime.now().strftime("%Y-%m-%d")
-
-    # 조회수 추출 (예시: 33)
-    view_count_el = soup.select_one("strong > i.fa-eye")  # 조회수에 해당하는 i 태그를 선택
-
-    if view_count_el:
-        raw_text = view_count_el.find_previous("strong").text.strip()
-        m = re.search(r'\d+', raw_text)  # 숫자만 추출
-        view_count = int(m.group()) if m else 0
-    else:
-        view_count = 0  
-
-    return {
-        "title": title,                         # ← 이제 깔끔한 제목
-        "department": "화학공학과",
-        "posted_date": parse_date_any(date_text) or datetime.now().strftime("%Y-%m-%d"),
-        "post_number": wr_id,
-        "content_text": content_text,
-        "view_count": view_count  # 조회수 추가
-    }
-
-def process_one_cheme(wr_id: int) -> str:
-    """화학공학과 공지사항 한 건 처리 (포털 방식과 동일하게)"""
-    html = fetch_notice_html_cheme(wr_id)
-    if not html:
-        print(f"⚠️ wr_id={wr_id}: HTML 로드 실패 → 스킵")
-        return "skipped_error"
-
-    parsed = parse_notice_fields_cheme(html, wr_id)
-    if not parsed:
-        print(f"wr_id={wr_id}: 게시물 없음")
-        return "not_found"
-
-    post_number = parsed["post_number"]
-    title = parsed["title"]
-    department = parsed["department"]
-    posted_date = parsed["posted_date"]
-    view_count = parsed["view_count"]  
-
-    # 링크
-    crawl_link = f"{CHEME_LIST_URL}&wr_id={wr_id}"
-    db_link    = crawl_link  # DB에 저장할 링크
-
-    # 중복 체크
-    prev_dt_raw = get_existing_posted_date("DEPT_CHEMICAL_ENGINEERING", post_number)
-    prev_dt = _ymd(prev_dt_raw)
-    curr_dt = _ymd(posted_date)
-
-    if prev_dt:
-        if prev_dt == curr_dt:
-            print(f"wr_id={wr_id} (post_number={post_number}) 이미 존재 (posted_date={curr_dt}) → 스킵")
-            return "stored"
+        # URL 구성 (url_type에 따라 다름)
+        if url_type in ["path", "slug"]:
+            # 경로/slug 방식: /notices/undergraduate/page/2/ or /board/notice/page/2/
+            if page == 1:
+                url = list_url
+            else:
+                url = f"{list_url.rstrip('/')}/page/{page}/"
         else:
-            print(f"wr_id={wr_id} (post_number={post_number}) 날짜 변경 {prev_dt} → {curr_dt}, 업데이트 진행")
+            # 쿼리 파라미터 방식: ?page=2&bo_table=notice
+            params = {"page": page}
+            params.update(list_params)
+            url = list_url
 
-    # HTML 본문 텍스트 추출
-    html_text = extract_main_text_from_html(html)
+        # 요청
+        if url_type in ["path", "slug"]:
+            r = requests.get(url, headers=headers, timeout=(10, 20))
+        else:
+            r = requests.get(url, params=params, headers=headers, timeout=(10, 20))
 
-    # HTML → 전체 이미지 캡처
-    imgs = html_to_images_playwright(
-        crawl_link,
-        viewport_width=1200,
-        slice_height=1800,
-        debug_full_image_path=None,
-        full_image_format="png",
-    )
-    if not imgs:
-        print(f"↳ wr_id={wr_id}: 이미지 캡처 실패 → 스킵")
-        return "skipped_error"
-
-    # 텍스트 + 이미지 동시 요약
-    summary = summarize_with_text_and_images(html_text, imgs)
-    if not summary:
-        print(f"↳ wr_id={wr_id}: 텍스트+이미지 요약 실패 → 스킵")
-        return "skipped_error"
-
-    print(summary)
-    # DB 업서트
-    row = {
-        "category": "COLLEGE_ENGINEERING",
-        "post_number": post_number,
-        "title": title,
-        "link": db_link,
-        "summary": summary,
-        "embedding_vector": None,
-        "posted_date": posted_date,
-        "department": department,
-        "view_count": view_count
-    }
-    try:
-        upsert_notice(row)
-        print(f"✅ 저장 완료: [화학공학과] wr_id={wr_id}, post_number={post_number}, title={title[:50]}, link={db_link}, posted_date={posted_date}, department={department}, viewCount={view_count}")
-        return "stored"
-    except MySQLError as e:
-        print(f"❌ DB 저장 실패: {e.__class__.__name__}({getattr(e,'errno',None)}): {e}")
-        tb = traceback.format_exc(limit=3)
-        print(f"↳ Traceback(요약):\n{tb}")
-        return "skipped_error"
-    
-# =========================
-# 8-2) 생명과학과
-# =========================
-
-def collect_recent_seqs_lifesci(limit: int = 100, max_pages: int = 20) -> List[int]:
-    headers = {"User-Agent": "Mozilla/5.0"}
-    collected: List[int] = []
-    seen = set()
-
-    for page in range(1, max_pages + 1):
-        params = {"page": page}
-        r = requests.get(LIFE_SCI_LIST_URL, params=params, headers=headers, timeout=(10, 20))
         if r.status_code != 200:
-            print(f"❌ 생명과학과 목록 요청 실패 page={page}: {r.status_code}")
+            print(f"❌ {dept_key} 목록 요청 실패 page={page}: {r.status_code}")
             break
 
         soup = BeautifulSoup(r.text, "html.parser")
 
-        # ✅ 리스트 구조나 배지 클래스에 의존하지 않고, bbsidx 링크만 수집
-        page_ids: List[int] = []
-        for a in soup.select('a[href*="bbsidx="]'):
-            href = a.get("href", "")
-            m = re.search(r"bbsidx=(\d+)", href)
-            if m:
-                page_ids.append(int(m.group(1)))
+        # ID/slug 추출 (url_type에 따라 다름)
+        page_items = []
+
+        if url_type == "slug":
+            # WordPress slug 방식: /uosarch_notice/slug-name/
+            for a in soup.select('a[href*="/uosarch_notice/"]'):
+                href = a.get("href", "")
+                m = re.search(r"/uosarch_notice/([^/]+)/?$", href)
+                if m:
+                    slug = m.group(1)
+                    # URL 인코딩된 slug 디코딩
+                    from urllib.parse import unquote
+                    slug = unquote(slug)
+                    page_items.append(slug)
+        elif url_type == "path":
+            # 경로 방식: /notices/19184 같은 링크에서 ID 추출
+            for a in soup.select('a[href*="/notices/"]'):
+                href = a.get("href", "")
+                m = re.search(r"/notices/(\d+)", href)
+                if m:
+                    page_items.append(int(m.group(1)))
+        else:
+            # 쿼리 파라미터 방식: ?wr_id=123 같은 링크에서 ID 추출
+            for a in soup.select(f'a[href*="{id_param}="]'):
+                href = a.get("href", "")
+                m = re.search(rf"{id_param}=(\d+)", href)
+                if m:
+                    page_items.append(int(m.group(1)))
 
         # 중복 제거 + 순서 유지
-        page_ids = list(OrderedDict.fromkeys(page_ids))
+        page_items = list(OrderedDict.fromkeys(page_items))
 
         new_cnt = 0
-        for idx in page_ids:
-            if idx not in seen:
-                seen.add(idx)
-                collected.append(idx)
+        for item in page_items:
+            if item not in seen:
+                seen.add(item)
+                collected.append(item)
                 new_cnt += 1
                 if len(collected) >= limit:
                     return collected
@@ -810,86 +735,259 @@ def collect_recent_seqs_lifesci(limit: int = 100, max_pages: int = 20) -> List[i
 
     return collected
 
-def fetch_notice_html_lifesci(bbsidx: int) -> Optional[str]:
-    """생명과학과 개별 공지 HTML 가져오기 (화공과 fetch 함수와 구조 동일)"""
-    # URL 구조: ...notice?md=v&bbsidx=11971
-    url = f"{LIFE_SCI_LIST_URL}?md=v&bbsidx={bbsidx}"
+
+def fetch_notice_html_generic(dept_key: str, post_id) -> Optional[str]:
+    """학과별 독립 URL에서 개별 공지 HTML 가져오기 (통합)
+    post_id는 int 또는 str(slug)일 수 있음
+    """
+    config = DEPT_CONFIGS.get(dept_key)
+    if not config:
+        return None
+
+    url_type = config.get("url_type", "query")
+
+    # URL 구성 (url_type에 따라 다름)
+    if url_type == "slug":
+        # WordPress slug 방식: https://uosarch.ac.kr/uosarch_notice/slug-name/
+        from urllib.parse import quote
+        detail_url_base = config.get("detail_url_base")
+        slug = post_id if isinstance(post_id, str) else str(post_id)
+        # slug가 이미 인코딩되어 있을 수 있으므로, 안전하게 처리
+        url = f"{detail_url_base}{slug}/"
+    elif url_type == "path":
+        # 경로 방식: https://econ.uos.ac.kr/notices/19184
+        detail_url_template = config.get("detail_url_template")
+        if detail_url_template:
+            url = detail_url_template.format(post_id=post_id)
+        else:
+            # 템플릿이 없으면 기본 패턴 사용
+            base = config["list_url"].split("/notices/")[0]
+            url = f"{base}/notices/{post_id}"
+    else:
+        # 쿼리 파라미터 방식
+        list_url = config["list_url"]
+        id_param = config["id_param"]
+        list_params = config.get("list_params", {})
+
+        params = {id_param: post_id}
+        params.update(list_params)
+
+        # 생명과학과는 md=v 파라미터 추가
+        if dept_key == "DEPT_LIFE_SCIENCE":
+            params["md"] = "v"
+
+        # URL 조합
+        if "?" in list_url:
+            url = f"{list_url}&{urlencode(params)}"
+        else:
+            url = f"{list_url}?{urlencode(params)}"
+
     headers = {"User-Agent": "Mozilla/5.0"}
     r = requests.get(url, headers=headers, timeout=(10, 20))
     if r.status_code != 200:
-        print(f"❌ 생명과학과 상세 요청 실패 bbsidx={bbsidx}, status={r.status_code}")
+        print(f"❌ {dept_key} 상세 요청 실패 post_id={post_id}, status={r.status_code}")
         return None
     return r.text
 
-def parse_notice_fields_lifesci(html: str, bbsidx: int) -> Optional[dict]:
+
+def parse_notice_fields_generic(dept_key: str, html: str, post_id: int) -> Optional[dict]:
+    """학과별 독립 URL HTML 파싱 (통합)"""
+    config = DEPT_CONFIGS.get(dept_key)
+    if not config:
+        return None
+
     soup = BeautifulSoup(html, "html.parser")
+    selectors = config["selectors"]
+    department = config["department"]
 
-    # ✅ 제목: h1.bbstitle
-    title_el = soup.select_one("h1.bbstitle")
-    title = title_el.get_text(" ", strip=True) if title_el else ""
+    # 제목 추출
+    title = ""
+    for sel in selectors.get("title", []):
+        if sel == "title":
+            # <title> 태그 특수 처리
+            title_el = soup.find("title")
+            if title_el:
+                title = title_el.get_text(strip=True)
+                # "- 서울시립대학교 경제학부" 같은 접미사 제거
+                title = re.sub(r"\s*[-–—]\s*서울시립대학교.*$", "", title).strip()
+                break
+        else:
+            title_el = soup.select_one(sel)
+            if title_el:
+                title = title_el.get_text(" ", strip=True)
+                break
 
-    # ✅ 날짜/조회수: div.writer 안의 텍스트에서 추출
-    writer_el = soup.select_one("div.writer")
+    # 본문 추출
+    content_text = ""
+    content_selectors = selectors.get("content", [])
+    if content_selectors:
+        for sel in content_selectors:
+            content_el = soup.select_one(sel)
+            if content_el:
+                content_text = content_el.get_text("\n", strip=True)
+                break
+    if not content_text:
+        content_text = extract_main_text_from_html(html)
+
+    # 날짜/조회수 정보 추출
     date_text, view_count = "", 0
-    if writer_el:
-        text = writer_el.get_text(" ", strip=True)
-        # 날짜 추출 (예: 2022-07-15)
-        m_date = re.search(r"\d{4}-\d{2}-\d{2}", text)
-        if m_date:
-            date_text = m_date.group()
-        # 조회수 추출 (예: 조회수 525)
-        m_view = re.search(r"조회수\s*([0-9,]+)", text)
-        if m_view:
-            view_count = int(m_view.group(1).replace(",", ""))
+    date_info_selectors = selectors.get("date_info", [])
 
-    # ✅ 본문 추출: extract_main_text_from_html 이용
-    content_text = extract_main_text_from_html(html)
+    for sel in date_info_selectors:
+        info_el = soup.select_one(sel)
+        if info_el:
+            text = info_el.get_text(" ", strip=True)
 
-    # ✅ 날짜 없으면 오늘 날짜로 대체
-    posted_date = parse_date_yyyy_mm_dd(date_text) or datetime.now().strftime("%Y-%m-%d")
+            # 날짜 추출
+            if not date_text:
+                # yyyy-mm-dd 형식
+                m_date = re.search(r"\d{4}-\d{2}-\d{2}", text)
+                if m_date:
+                    date_text = m_date.group()
+                else:
+                    # yyyy년 mm월 dd일 형식 (경제학부)
+                    m_date_kr = re.search(r"(\d{4})년\s*(\d{1,2})월\s*(\d{1,2})일", text)
+                    if m_date_kr:
+                        yyyy = int(m_date_kr.group(1))
+                        mm = int(m_date_kr.group(2))
+                        dd = int(m_date_kr.group(3))
+                        date_text = f"{yyyy:04d}-{mm:02d}-{dd:02d}"
+                    else:
+                        # "월 일, 년" 형식 (건축학부: "9월 22, 2025")
+                        m_date_mon = re.search(r"(\d{1,2})월\s+(\d{1,2}),\s+(\d{4})", text)
+                        if m_date_mon:
+                            mm = int(m_date_mon.group(1))
+                            dd = int(m_date_mon.group(2))
+                            yyyy = int(m_date_mon.group(3))
+                            date_text = f"{yyyy:04d}-{mm:02d}-{dd:02d}"
+                        else:
+                            # yy-mm-dd 형식 (화학공학과)
+                            m_date_short = re.search(r'(?<!\d)(?P<yy>\d{2})-(?P<mm>\d{2})-(?P<dd>\d{2})(?!\d)', text)
+                            if m_date_short:
+                                yy = int(m_date_short['yy'])
+                                mm = int(m_date_short['mm'])
+                                dd = int(m_date_short['dd'])
+                                yyyy = 2000 + yy
+                                date_text = f"{yyyy:04d}-{mm:02d}-{dd:02d}"
+
+            # 조회수 추출
+            if view_count == 0:
+                # "조회수 123" 형식
+                m_view = re.search(r"조회수\s*([0-9,]+)", text)
+                if m_view:
+                    view_count = int(m_view.group(1).replace(",", ""))
+                else:
+                    # "Views 168" 형식 (건축학부)
+                    m_view_en = re.search(r"Views?\s+(\d+)", text, re.I)
+                    if m_view_en:
+                        view_count = int(m_view_en.group(1))
+
+    # 화학공학과 조회수 (아이콘으로 찾기)
+    if dept_key == "DEPT_CHEMICAL_ENGINEERING" and view_count == 0:
+        view_count_el = soup.select_one("strong > i.fa-eye")
+        if view_count_el:
+            raw_text = view_count_el.find_previous("strong").text.strip()
+            m = re.search(r'\d+', raw_text)
+            view_count = int(m.group()) if m else 0
+
+    posted_date = date_text or datetime.now().strftime("%Y-%m-%d")
 
     return {
         "title": title,
-        "department": "생명과학과",
+        "department": department,
         "posted_date": posted_date,
-        "post_number": bbsidx,
+        "post_number": post_id,
         "content_text": content_text,
         "view_count": view_count,
     }
 
-def process_one_lifesci(bbsidx: int) -> str:
-    """생명과학과 공지사항 한 건 처리 (화공과 process 함수와 구조 동일)"""
-    html = fetch_notice_html_lifesci(bbsidx)
-    if not html:
-        print(f"⚠️ bbsidx={bbsidx}: HTML 로드 실패 → 스킵")
+
+def process_one_generic(dept_key: str, post_id: int) -> str:
+    """학과별 독립 URL 공지사항 한 건 처리 (통합)"""
+    config = DEPT_CONFIGS.get(dept_key)
+    if not config:
+        print(f"❌ 설정되지 않은 학과: {dept_key}")
         return "skipped_error"
 
-    parsed = parse_notice_fields_lifesci(html, bbsidx)
+    category = config["category"]
+    department = config["department"]
+    list_url = config["list_url"]
+    id_param = config["id_param"]
+
+    # HTML 가져오기
+    html = fetch_notice_html_generic(dept_key, post_id)
+    if not html:
+        print(f"⚠️ {dept_key} {id_param}={post_id}: HTML 로드 실패 → 스킵")
+        return "skipped_error"
+
+    # 파싱
+    parsed = parse_notice_fields_generic(dept_key, html, post_id)
     if not parsed:
-        print(f"bbsidx={bbsidx}: 게시물 없음")
+        print(f"{dept_key} {id_param}={post_id}: 게시물 없음")
         return "not_found"
 
     post_number = parsed["post_number"]
     title = parsed["title"]
-    department = parsed["department"]
     posted_date = parsed["posted_date"]
-    view_count = parsed["view_count"] 
+    view_count = parsed.get("view_count", 0)
 
-    # 링크
-    crawl_link = f"{LIFE_SCI_LIST_URL}?md=v&bbsidx={bbsidx}"
-    db_link = crawl_link 
+    # 링크 생성 (url_type에 따라 다름)
+    url_type = config.get("url_type", "query")
 
-    # 중복 체크: 자연과학대학 카테고리 사용 (COLLEGE_NATURAL_SCIENCES)
-    prev_dt_raw = get_existing_posted_date("COLLEGE_NATURAL_SCIENCES", post_number)
+    if url_type == "slug":
+        # WordPress slug 방식: https://uosarch.ac.kr/uosarch_notice/slug-name/
+        detail_url_base = config.get("detail_url_base")
+        slug = post_id if isinstance(post_id, str) else str(post_id)
+        crawl_link = f"{detail_url_base}{slug}/"
+        db_link = crawl_link
+    elif url_type == "path":
+        # 경로 방식: https://econ.uos.ac.kr/notices/19184
+        detail_url_template = config.get("detail_url_template")
+        if detail_url_template:
+            crawl_link = detail_url_template.format(post_id=post_id)
+        else:
+            base = list_url.split("/notices/")[0]
+            crawl_link = f"{base}/notices/{post_id}"
+        db_link = crawl_link
+    else:
+        # 쿼리 파라미터 방식 (화학공학과, 생명과학과)
+        list_params = config.get("list_params", {})
+        params = {id_param: post_id}
+        params.update(list_params)
+
+        if dept_key == "DEPT_LIFE_SCIENCE":
+            params["md"] = "v"
+
+        if "?" in list_url:
+            crawl_link = f"{list_url}&{urlencode(params)}"
+        else:
+            crawl_link = f"{list_url}?{urlencode(params)}"
+
+        db_link = crawl_link
+
+    # 중복 체크
+    prev_dt_raw = get_existing_posted_date(category, post_number)
     prev_dt = _ymd(prev_dt_raw)
     curr_dt = _ymd(posted_date)
 
     if prev_dt:
         if prev_dt == curr_dt:
-            print(f"bbsidx={bbsidx} (post_number={post_number}) 이미 존재 (posted_date={curr_dt}) → 스킵")
+            # 날짜는 같지만 조회수는 업데이트 (가벼운 업데이트)
+            print(f"{dept_key} {id_param}={post_id} (post_number={post_number}) 이미 존재 → 조회수만 업데이트")
+
+            # 조회수만 업데이트
+            with mysql_conn() as conn:
+                cur = conn.cursor()
+                cur.execute(
+                    "UPDATE notice SET view_count = %s WHERE category = %s AND post_number = %s",
+                    (view_count, category, post_number)
+                )
+                cur.close()
+
+            print(f"✅ 조회수 업데이트 완료: [{department}] {id_param}={post_id}, viewCount={view_count}")
             return "stored"
         else:
-            print(f"bbsidx={bbsidx} (post_number={post_number}) 날짜 변경 {prev_dt} → {curr_dt}, 업데이트 진행")
+            print(f"{dept_key} {id_param}={post_id} (post_number={post_number}) 날짜 변경 {prev_dt} → {curr_dt}, 업데이트 진행")
 
     # HTML 본문 텍스트 추출
     html_text = extract_main_text_from_html(html)
@@ -903,20 +1001,20 @@ def process_one_lifesci(bbsidx: int) -> str:
         full_image_format="png",
     )
     if not imgs:
-        print(f"↳ bbsidx={bbsidx}: 이미지 캡처 실패 → 스킵")
+        print(f"↳ {dept_key} {id_param}={post_id}: 이미지 캡처 실패 → 스킵")
         return "skipped_error"
 
     # 텍스트 + 이미지 동시 요약
     summary = summarize_with_text_and_images(html_text, imgs)
     if not summary:
-        print(f"↳ bbsidx={bbsidx}: 텍스트+이미지 요약 실패 → 스킵")
+        print(f"↳ {dept_key} {id_param}={post_id}: 텍스트+이미지 요약 실패 → 스킵")
         return "skipped_error"
 
     print(summary)
-    
+
     # DB 업서트
     row = {
-        "category": "COLLEGE_NATURAL_SCIENCES",
+        "category": category,
         "post_number": post_number,
         "title": title,
         "link": db_link,
@@ -928,11 +1026,12 @@ def process_one_lifesci(bbsidx: int) -> str:
     }
     try:
         upsert_notice(row)
-        print(f"✅ 저장 완료: [생명과학과] bbsidx={bbsidx}, post_number={post_number}, title={title[:50]}, link={db_link}, posted_date={posted_date}, viewcount={view_count}, department={department}")
+        print(f"✅ 저장 완료: [{department}] {id_param}={post_id}, post_number={post_number}, title={title}, posted_date={posted_date}, viewCount={view_count}")
         return "stored"
     except MySQLError as e:
-        print(f"❌ DB 저장 실패: {e.__class__.__name__}: {e}")
-        traceback.print_exc(limit=3, file=sys.stdout)
+        print(f"❌ DB 저장 실패: {e.__class__.__name__}({getattr(e,'errno',None)}): {e}")
+        tb = traceback.format_exc(limit=3)
+        print(f"↳ Traceback(요약):\n{tb}")
         return "skipped_error"
 
 # =========================
@@ -941,20 +1040,21 @@ def process_one_lifesci(bbsidx: int) -> str:
 def main() -> int:
     print(f"Screenshot directory: {OUT_DIR}")
 
-    targets = [
-        "GENERAL",
-        "ACADEMIC",
-        "COLLEGE_ENGINEERING",
-        "COLLEGE_HUMANITIES",
-        "COLLEGE_SOCIAL_SCIENCES",
-        "COLLEGE_URBAN_SCIENCE",
-        "COLLEGE_ARTS_SPORTS",
-        "COLLEGE_BUSINESS",
-        "COLLEGE_NATURAL_SCIENCES",
-        "COLLEGE_LIBERAL_CONVERGENCE"
+    # 포털 공통 카테고리 처리
+    portal_targets = [
+        # "GENERAL",
+        # "ACADEMIC",
+        # "COLLEGE_ENGINEERING",
+        # "COLLEGE_HUMANITIES",
+        # "COLLEGE_SOCIAL_SCIENCES",
+        # "COLLEGE_URBAN_SCIENCE",
+        # "COLLEGE_ARTS_SPORTS",
+        # "COLLEGE_BUSINESS",
+        # "COLLEGE_NATURAL_SCIENCES",
+        # "COLLEGE_LIBERAL_CONVERGENCE",
     ]
 
-    for cat in targets:
+    for cat in portal_targets:
         list_id = CATEGORIES.get(cat)
         if not list_id or "TODO" in list_id.lower():
             print(f"⏭️  {cat}: list_id 미설정 → 건너뜀")
@@ -971,21 +1071,22 @@ def main() -> int:
             process_one(cat, list_id, seq)
             time.sleep(REQUEST_SLEEP)
 
-    # # 🔹 화학공학과 공지 처리
-    seqs = collect_recent_seqs_cheme(limit=100)
-    
-    print(f"==== [화학공학과] {len(seqs)}개 수집됨 ====", flush=True)
-    for wr_id in reversed(seqs):
-        process_one_cheme(wr_id)
-        time.sleep(REQUEST_SLEEP)
+    # 학과별 독립 URL 처리 (통합 방식)
+    for dept_key in DEPT_CONFIGS.keys():
+        config = DEPT_CONFIGS[dept_key]
+        department = config["department"]
 
-    # 🔹 생명과학과 공지 처리
-    seqs = collect_recent_seqs_lifesci(limit=100)
-    
-    print(f"==== [생명과학과] {len(seqs)}개 수집됨 ====", flush=True)
-    for wr_id in reversed(seqs):
-        process_one_lifesci(wr_id)
-        time.sleep(REQUEST_SLEEP)
+        #해당 부분이 학과별 독립 링크에서 각각 몇개씩 가져올지를 설정
+        seqs = collect_recent_seqs_generic(dept_key, limit=50)
+
+        if not seqs:
+            print(f"⚠️ [{department}]: 목록에서 게시물을 찾지 못해 건너뜀")
+            continue
+
+        print(f"==== [{department}] {len(seqs)}개 수집됨 ====", flush=True)
+        for post_id in reversed(seqs):
+            process_one_generic(dept_key, post_id)
+            time.sleep(REQUEST_SLEEP)
 
     return 0
 
